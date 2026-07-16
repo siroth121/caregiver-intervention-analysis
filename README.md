@@ -12,8 +12,9 @@ survey data cleaning, scale reliability checks, non-parametric statistical
 testing, bootstrapped correlation analysis, and co-authoring the poster below.
 Findings will inform the design of future NIH-funded caregiver interventions.
 
-➡️ analysis_demo.md — the full statistical pipeline in R,
-demonstrated on simulated data (participant data is confidential): Cronbach's
+Files: 
+analysis_demo.md — contains the full statistical pipeline in R,
+demonstrated on simulated data (real participant data kept confidential): Cronbach's
 alpha, Friedman test with Kendall's W, Bonferroni-corrected pairwise Wilcoxon
 tests with rank-biserial effect sizes, Mann-Whitney U, and Spearman
 correlations with BCa bootstrapped confidence intervals.

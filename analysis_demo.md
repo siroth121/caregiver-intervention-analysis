@@ -1,0 +1,435 @@
+BCT Favorability & Co-Walking Analysis — Methods Demonstration
+================
+Sofia Roth
+
+> **Note on data:** Participant data from this NIH-funded study
+> (P30AG063786) is confidential. This notebook demonstrates the *exact
+> analysis pipeline* I ran during my internship at the Feinstein
+> Institutes for Medical Research, applied to **simulated data** that
+> matches the study’s structure (N = 146 caregivers, two trial arms,
+> Likert-scale survey responses). Simulated results will differ from the
+> published findings summarized in the poster.
+
+``` r
+library(tidyverse)
+library(psych)       # Cronbach's alpha, descriptives
+library(rstatix)     # Kendall's W
+library(effectsize)  # rank-biserial effect sizes
+library(boot)        # BCa bootstrapped CIs
+library(patchwork)   # multi-panel figures
+```
+
+## 1. Simulating the study structure
+
+The real dataset contained a post-study survey gathering responses from
+146 caregivers of persons with Alzheimer’s disease and AD-related
+dementias (AD/ADRD) randomized to a 1-hour daily walking trial (n = 69)
+or a 4-hour hourly walking trial (n = 77). Each participant rated four
+Behavior Change Techniques (BCTs) such as Goal Setting, Action Planning,
+Prompt/Cue, Self-Monitoring on three items each (satisfaction, ease of
+use, helpfulness), on a 1–4 Likert scale.
+
+I simulate that structure here, building in a slight preference for
+Prompt/Cue to mimic the direction of the real finding.
+
+``` r
+n <- 146
+
+simulate_bct <- function(n, base_probs) {
+  replicate(3, sample(1:4, n, replace = TRUE, prob = base_probs))
+}
+
+rq1_df <- tibble(
+  record_id   = 1:n,
+  trial_group = c(rep("1", 69), rep("4", 77))
+)
+
+# Prompt/Cue gets a distribution shifted slightly toward higher ratings
+bct_probs <- list(
+  goal   = c(.05, .15, .45, .35),
+  action = c(.05, .18, .45, .32),
+  cue    = c(.03, .10, .42, .45),
+  self   = c(.06, .16, .44, .34)
+)
+
+for (bct in names(bct_probs)) {
+  items <- simulate_bct(n, bct_probs[[bct]])
+  rq1_df[[paste0(bct, "_sat")]]  <- items[, 1]
+  rq1_df[[paste0(bct, "_ease")]] <- items[, 2]
+  rq1_df[[paste0(bct, "_help")]] <- items[, 3]
+}
+```
+
+## 2. Scale reliability: Cronbach’s alpha
+
+Before combining the three items per BCT into a composite score, I
+checked internal consistency. If the items don’t relate to another, a
+composite isn’t justified.
+
+``` r
+alpha_goal <- psych::alpha(rq1_df %>% select(goal_sat, goal_ease, goal_help))
+```
+
+    ## Some items ( goal_ease ) were negatively correlated with the first principal component and 
+    ## probably should be reversed.  
+    ## To do this, run the function again with the 'check.keys=TRUE' option
+
+``` r
+alpha_cue  <- psych::alpha(rq1_df %>% select(cue_sat, cue_ease, cue_help))
+```
+
+    ## Some items ( cue_sat ) were negatively correlated with the first principal component and 
+    ## probably should be reversed.  
+    ## To do this, run the function again with the 'check.keys=TRUE' option
+
+``` r
+alpha_goal$total$raw_alpha
+```
+
+    ## [1] -0.01359778
+
+``` r
+alpha_cue$total$raw_alpha
+```
+
+    ## [1] -0.06224479
+
+*(In the real data, alphas supported compositing passing a significance
+level of greater than 0.70. Simulated items here are independent draws,
+so alpha may be low)*
+
+## 3. Composite scores and descriptives
+
+``` r
+mean_df <- rq1_df %>%
+  mutate(
+    goal_overall   = rowMeans(pick(goal_sat, goal_ease, goal_help), na.rm = TRUE),
+    action_overall = rowMeans(pick(action_sat, action_ease, action_help), na.rm = TRUE),
+    cue_overall    = rowMeans(pick(cue_sat, cue_ease, cue_help), na.rm = TRUE),
+    self_overall   = rowMeans(pick(self_sat, self_ease, self_help), na.rm = TRUE)
+  ) %>%
+  select(record_id, trial_group, ends_with("_overall"))
+
+psych::describe(mean_df %>% select(ends_with("_overall")))
+```
+
+    ##                vars   n mean   sd median trimmed  mad  min max range  skew
+    ## goal_overall      1 146 3.14 0.46   3.33    3.17 0.49 2.00   4  2.00 -0.33
+    ## action_overall    2 146 3.10 0.47   3.33    3.13 0.49 1.67   4  2.33 -0.62
+    ## cue_overall       3 146 3.30 0.44   3.33    3.31 0.49 2.00   4  2.00 -0.29
+    ## self_overall      4 146 3.04 0.50   3.00    3.05 0.49 2.00   4  2.00 -0.20
+    ##                kurtosis   se
+    ## goal_overall      -0.74 0.04
+    ## action_overall     0.06 0.04
+    ## cue_overall       -0.40 0.04
+    ## self_overall      -0.75 0.04
+
+## 4. RQ1a: Which BCT do caregivers favor?
+
+**Analyst decision:** the composites are built from ordinal Likert items
+and are not normally distributed, and each participant rated all four
+BCTs (repeated measures). That rules out repeated-measures ANOVA in
+favor of the **Friedman test**, with **Kendall’s W** as the effect size.
+
+``` r
+friedman_data <- mean_df %>%
+  select(ends_with("_overall")) %>%
+  drop_na()
+
+friedman.test(as.matrix(friedman_data))
+```
+
+    ## 
+    ##  Friedman rank sum test
+    ## 
+    ## data:  as.matrix(friedman_data)
+    ## Friedman chi-squared = 13.856, df = 3, p-value = 0.003109
+
+``` r
+long_df <- mean_df %>%
+  drop_na() %>%
+  pivot_longer(ends_with("_overall"), names_to = "BCT", values_to = "Score")
+
+friedman_effsize(long_df, Score ~ BCT | record_id)
+```
+
+    ## # A tibble: 1 × 5
+    ##   .y.       n effsize method    magnitude
+    ## * <chr> <int>   <dbl> <chr>     <ord>    
+    ## 1 Score   146  0.0316 Kendall W small
+
+### Post-hoc pairwise comparisons
+
+With six pairwise comparisons, the family-wise error rate multiplies —
+so each Wilcoxon signed-rank p-value is **Bonferroni-corrected** (× 6,
+capped at 1). I also report **rank-biserial r** with 95% CIs, because a
+p-value wont report the magnitude of the difference.
+
+``` r
+bct_labels <- c(goal_overall = "Goal Setting", action_overall = "Action Planning",
+                cue_overall = "Prompt/Cue", self_overall = "Self-Monitoring")
+
+pairs <- combn(names(bct_labels), 2, simplify = FALSE)
+
+pairwise_results <- map_dfr(pairs, function(p) {
+  d <- mean_df %>% select(all_of(p)) %>% drop_na()
+  test <- wilcox.test(d[[p[1]]], d[[p[2]]], paired = TRUE, exact = FALSE)
+  es   <- rank_biserial(d[[p[1]]], d[[p[2]]], paired = TRUE, ci = 0.95)
+  tibble(
+    comparison = paste(bct_labels[[p[1]]], "vs", bct_labels[[p[2]]]),
+    V = test$statistic, p_raw = test$p.value,
+    p_adj = pmin(test$p.value * 6, 1),
+    r_rb = round(es$r_rank_biserial, 3),
+    CI = sprintf("[%.2f, %.2f]", es$CI_low, es$CI_high)
+  )
+})
+
+pairwise_results
+```
+
+    ## # A tibble: 6 × 6
+    ##   comparison                             V     p_raw     p_adj   r_rb CI        
+    ##   <chr>                              <dbl>     <dbl>     <dbl>  <dbl> <chr>     
+    ## 1 Goal Setting vs Action Planning    3474. 0.576     1          0.06  [-0.13, 0…
+    ## 2 Goal Setting vs Prompt/Cue         2284. 0.00322   0.0193    -0.315 [-0.47, -…
+    ## 3 Goal Setting vs Self-Monitoring    4144  0.0878    0.527      0.18  [-0.00, 0…
+    ## 4 Action Planning vs Prompt/Cue      1971  0.000782  0.00469   -0.366 [-0.52, -…
+    ## 5 Action Planning vs Self-Monitoring 4132. 0.252     1          0.119 [-0.07, 0…
+    ## 6 Prompt/Cue vs Self-Monitoring      5050. 0.0000129 0.0000775  0.463 [0.30, 0.…
+
+## 5. RQ1b: Does favorability differ by the 1-hour trial vs 4-hour trial?
+
+Between-group comparison of independent samples with ordinal outcomes
+therefore **unpaired Wilcoxon (Mann-Whitney U)**, Bonferroni-corrected
+across the four BCTs.
+
+``` r
+trial_results <- map_dfr(names(bct_labels), function(bct) {
+  d <- mean_df %>% select(trial_group, score = all_of(bct)) %>% drop_na()
+  test <- wilcox.test(score ~ trial_group, data = d, exact = FALSE)
+  es   <- rank_biserial(score ~ trial_group, data = d, ci = 0.95)
+  tibble(
+    BCT = bct_labels[[bct]],
+    W = test$statistic, p_raw = test$p.value,
+    p_adj = pmin(test$p.value * 4, 1),
+    r_rb = round(es$r_rank_biserial, 3)
+  )
+})
+
+trial_results
+```
+
+    ## # A tibble: 4 × 5
+    ##   BCT                 W p_raw p_adj   r_rb
+    ##   <chr>           <dbl> <dbl> <dbl>  <dbl>
+    ## 1 Goal Setting    2604. 0.833 1     -0.02 
+    ## 2 Action Planning 3038. 0.125 0.501  0.143
+    ## 3 Prompt/Cue      2623  0.894 1     -0.013
+    ## 4 Self-Monitoring 2633  0.927 1     -0.009
+
+``` r
+plot_df <- long_df %>%
+  mutate(
+    BCT = factor(bct_labels[BCT], levels = bct_labels),
+    trial_group = factor(trial_group, levels = c("1", "4"),
+                         labels = c("Trial 1 (1-hour)", "Trial 2 (4-hour)"))
+  )
+
+ggplot(plot_df, aes(BCT, Score, fill = trial_group)) +
+  geom_violin(position = position_dodge(.8),
+              alpha = .25, color = NA) +
+  geom_boxplot(position = position_dodge(.8),
+               width = .25, outlier.shape = NA, alpha = .9) +
+  stat_summary(fun = mean, geom = "point",
+               shape = 23, size = 4,
+               fill = "white", color = "black",
+               position = position_dodge(.8)) +
+  scale_fill_manual(values = c("#0072B2", "#D55E00")) +
+  scale_y_continuous(limits = c(1, 4), breaks = 1:4) +
+  labs(
+    title = "Ratings Were Similar Across Trials",
+    x = "Behavior change techniques",
+    y = "BCT composite rating",
+    fill = "Trial"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    axis.title = element_text(size = 14),
+    legend.position = "top",
+    panel.grid.major.x = element_blank()
+  )
+```
+
+![](analysis_demo_files/figure-gfm/violin-plot-1.png)<!-- -->
+
+## 6. RQ2: Co-walking frequency and perceived physical and emotional health
+
+The co-walking survey was an exploratory, late-stage measure (n = 86 of
+146 in the real study). Added to the post-study survey to explore
+spillover effects of caregiver physical activity. **Analyst decisions:**
+(1) the research question concerns whether the *frequency* of co-walking
+relates to perceived improvements, so “Never” responses (caregivers who
+did not co-walk at all) were excluded to isolate the frequency gradient
+among participants who co-walked; (2) both variables are ordinal
+therefore **Spearman’s rho**; (3) heavy ties in 5-point scales so
+implemented `exact = FALSE`; (4) modest exploratory subsample leads to
+not trust asymptotic CIs; compute **bias-corrected and accelerated (BCa)
+bootstrap CIs** (5,000 resamples) instead.
+
+``` r
+n2 <- 86
+latent <- rnorm(n2)
+walking_df <- tibble(
+  activity_together  = pmin(pmax(round(2.8 + 1.1 * latent + rnorm(n2, 0, .8)), 1), 5),
+  positive_physical  = pmin(pmax(round(3.0 + 0.9 * latent + rnorm(n2, 0, .9)), 1), 5),
+  positive_emotional = pmin(pmax(round(3.1 + 0.8 * latent + rnorm(n2, 0, .9)), 1), 5)
+)
+
+# Exclude "Never" responses (activity_together == 1)
+walking_df <- walking_df %>% filter(activity_together != 1)
+cat("N after excluding 'Never':", nrow(walking_df), "\n")
+```
+
+    ## N after excluding 'Never': 69
+
+``` r
+cor.test(walking_df$activity_together, walking_df$positive_physical,
+         method = "spearman", exact = FALSE)
+```
+
+    ## 
+    ##  Spearman's rank correlation rho
+    ## 
+    ## data:  walking_df$activity_together and walking_df$positive_physical
+    ## S = 39377, p-value = 0.01949
+    ## alternative hypothesis: true rho is not equal to 0
+    ## sample estimates:
+    ##      rho 
+    ## 0.280663
+
+``` r
+spearman_stat <- function(data, indices, yvar) {
+  d <- data[indices, ]
+  cor(d$activity_together, d[[yvar]], method = "spearman")
+}
+
+set.seed(123)
+boot_physical <- boot(walking_df, spearman_stat, R = 5000, yvar = "positive_physical")
+boot.ci(boot_physical, type = "bca")
+```
+
+    ## BOOTSTRAP CONFIDENCE INTERVAL CALCULATIONS
+    ## Based on 5000 bootstrap replicates
+    ## 
+    ## CALL : 
+    ## boot.ci(boot.out = boot_physical, type = "bca")
+    ## 
+    ## Intervals : 
+    ## Level       BCa          
+    ## 95%   ( 0.0557,  0.4859 )  
+    ## Calculations and Intervals on Original Scale
+
+``` r
+set.seed(123)
+boot_emotional <- boot(walking_df, spearman_stat, R = 5000, yvar = "positive_emotional")
+boot.ci(boot_emotional, type = "bca")
+```
+
+    ## BOOTSTRAP CONFIDENCE INTERVAL CALCULATIONS
+    ## Based on 5000 bootstrap replicates
+    ## 
+    ## CALL : 
+    ## boot.ci(boot.out = boot_emotional, type = "bca")
+    ## 
+    ## Intervals : 
+    ## Level       BCa          
+    ## 95%   (-0.1020,  0.3286 )  
+    ## Calculations and Intervals on Original Scale
+
+``` r
+make_bubble <- function(data, yvar, col, panel) {
+
+  yvar_sym <- enquo(yvar)
+
+  d <- data %>%
+    filter(!is.na(activity_together), !is.na(!!yvar_sym))
+
+  test_result <- cor.test(
+    d$activity_together,
+    pull(d, !!yvar_sym),
+    method = "spearman",
+    exact = FALSE
+  )
+
+  rho  <- test_result$estimate
+  pval <- test_result$p.value
+
+  rho_label <- paste0("\u03C1 = ", sprintf("%.2f", rho))
+  p_label   <- if (pval < 0.001) "p < .001" else paste0("p = ", sprintf("%.3f", pval))
+
+  d %>%
+    count(activity_together, !!yvar_sym) %>%
+    ggplot(aes(activity_together, !!yvar_sym, size = n)) +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed",
+                color = col, linewidth = 1.1) +
+    geom_point(color = col, alpha = 0.55) +
+    scale_size_area(max_size = 22, guide = "none") +
+    scale_x_continuous(
+      breaks = 1:5,
+      labels = c("Never", "Rarely", "Sometimes", "Often", "Almost\nAlways")
+    ) +
+    scale_y_continuous(breaks = 1:5, limits = c(0.5, 5.5)) +
+    annotate("text", x = 4.8, y = 1.15, label = rho_label,
+             hjust = 1, size = 5, fontface = "italic", color = "grey30") +
+    annotate("text", x = 4.8, y = 0.75, label = p_label,
+             hjust = 1, size = 5, fontface = "italic", color = "grey30") +
+    labs(
+      x = "Co-walking frequency",
+      y = "Perceived improvement (1\u20135)",
+      title = panel
+    ) +
+    theme_minimal(base_size = 18) +
+    theme(
+      plot.title = element_text(face = "bold", color = col),
+      axis.title.x = element_text(size = 16, margin = margin(t = 10)),
+      axis.title.y = element_text(size = 16, margin = margin(r = 10))
+    )
+}
+
+pa <- make_bubble(walking_df, positive_physical, "#003CA5", "a) Physical health")
+pb <- make_bubble(walking_df, positive_emotional, "#00823D", "b) Emotional health")
+
+(pa | pb) +
+  plot_annotation(
+    title = "More Frequent Walking Together Was Associated With Better Perceived Health",
+    theme = theme(plot.title = element_text(face = "bold", size = 22))
+  ) &
+  theme(plot.margin = margin(5.5, 10, 5.5, 10))
+```
+
+![](analysis_demo_files/figure-gfm/bubble-plot-1.png)<!-- -->
+
+## Real study results conclusion
+
+On the actual data, this pipeline showed: **Prompt/Cue BCT rating
+suggest direct prompts are more favored by AD/ADRD caregivers.** (rated
+significantly higher than Action Planning, p \< .05). Although, BCT
+favorability has **no significant difference** between the 1-hour and
+4-hour trial. This did not support HQ1b representing message burden not
+driving ratings. The **strong association of co-walking frequency** with
+care recipient physical (rho = 0.66) and emotional (rho = 0.63) health,
+both p \< .001 with BCa CIs excluding zero.
+
+These insights will drive future research and intervention design
+development for caregivers and patients with AD/ADRD. The consistency of
+BCT favorability across both trials demonstrates that text-based
+interventions remain effective in both one-hour and four-hour formats,
+offering flexibility to accommodate caregivers’ unique demands and
+schedules. Future research should leverage satisfaction data to optimize
+BCT methods and co-walking data to further investigate the therapeutic
+benefits of shared physical activity on patient well-being.
+
+This work was supported by the National Institute on Aging of the
+National Institutes of Health under Award Number P30AG063786. We thank
+all participating caregivers for their valuable contributions.
